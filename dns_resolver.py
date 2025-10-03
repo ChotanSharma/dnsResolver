@@ -7,6 +7,12 @@ There are 13 root servers defined at https://www.iana.org/domains/root/servers
 
 ROOT_SERVER = "199.7.83.42"    # ICANN Root Server
 DNS_PORT = 53
+
+# method to modify the input domain name
+def normalize_domain(domain: str) -> str:
+    return domain.lower().strip('.') + '.'
+
+
 def get_dns_record(udp_socket, domain:str, parent_server: str, record_type):
   q = DNSRecord.question(domain, qtype = record_type)
   q.header.rd = 0   # Recursion Desired?  NO
@@ -25,6 +31,10 @@ def get_dns_record(udp_socket, domain:str, parent_server: str, record_type):
   4. Authority
   5. Additional
   """
+
+  # a variable to store the the ip address
+  ip_addresses = []  
+  name_to_ips = {}  # Dictionary to map names to their IP addresses
   
   header = DNSHeader.parse(buff)
   print("DNS header", repr(header))
@@ -46,7 +56,8 @@ def get_dns_record(udp_socket, domain:str, parent_server: str, record_type):
     print(f"Answer-{k} {repr(a)}")
     if a.rtype == QTYPE.A:
       print("IP address")
-      
+      ip_addresses.append(str(a.rdata)) 
+
   # Parse the authority section #4
   for k in range(header.auth):
     auth = RR.parse(buff)
@@ -56,18 +67,39 @@ def get_dns_record(udp_socket, domain:str, parent_server: str, record_type):
   for k in range(header.ar):
     adr = RR.parse(buff)
     print(f"Additional-{k} {repr(adr)} Name: {adr.rname}")
+    if adr.rtype == QTYPE.A:  # Only grab IPv4 A records
+            name = str(adr.rname).rstrip('.')  # Clean name, e.g., 'a.edu-servers.net'
+            if name not in name_to_ips:
+                name_to_ips[name] = []
+            name_to_ips[name].append(str(adr.rdata))  # Add IP to list for that name
+            print(f"Grabbed IP '{adr.rdata}' for '{name}'")
+    # Return the IP address from the answer section
+  return ip_addresses, name_to_ips
 
   
 if __name__ == '__main__':
   # Create a UDP socket
   sock = socket(AF_INET, SOCK_DGRAM)
   # Get all the .edu name servers from the ROOT SERVER
-  get_dns_record(sock, "edu", ROOT_SERVER, "NS")
-  
-  # The following function calls are FAILED attempts to use Google Public DNS
-  # (1) to get name servers which manages gvsu.edu
-  # (2) to resolve the IP address of www.gvsu.edu
-  get_dns_record(sock, "gvsu.edu", "8.8.8.8", "NS")      # (1)
-  get_dns_record(sock, "www.gvsu.edu", "8.8.8.8", "A")   # (2)
-  
-  sock.close()
+  while True:
+    domain_name = input("Enter a domain name or .exit > ").strip()
+
+    if domain_name == '.exit':
+            break
+
+    # First check the cache
+   
+    # Resolve iteratively
+    results, name_to_ips = get_dns_record(sock, domain_name, ROOT_SERVER, 'A')# hard coding the record type to 
+    if results:
+        print(f"Resolved {domain_name}  -> {results}")
+    else:
+        print("Resolution failed.")
+        if name_to_ips:
+            print(f"Referral name-to-IPs: {name_to_ips}")
+            # Optional: Example usage for next query
+            first_name = next(iter(name_to_ips))
+            first_ip = name_to_ips[first_name][0]
+            print(f"Next server example: {first_name} -> {first_ip}")
+        else:
+            print("No referrals found.")
