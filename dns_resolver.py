@@ -208,16 +208,46 @@ def get_dns_record(udp_socket, domain: str, parent_server: str, record_type: str
 
   
 if __name__ == '__main__':
-     # Create a UDP socket with timeout
+    
+    # Create a UDP socket with timeout
     sock = socket(AF_INET, SOCK_DGRAM)
     sock.settimeout(5)  # 5 second timeout
 
+    cache_counter = 0  # For sequential IDs in cache_id_map
+
     # Get all the .edu name servers from the ROOT SERVER
     while True:
-        domain_name = input("Enter a domain name or .exit > ").strip()
+        user_input = input("Enter a domain name, .list, .clear, .remove <idx>, or .exit > ").strip()
 
-        if domain_name == '.exit':
+        if user_input == '.exit':
             break
+        elif user_input == '.list':
+            output = cache_list()
+            if output:
+                print("\n".join(output))
+            else:
+                print("Cache is empty.")
+            continue
+        elif user_input == '.clear':
+            cache_clear()
+            cache_counter = 0  # Reset counter too
+            print("Cache cleared.")
+            continue
+        elif user_input.startswith('.remove '):
+            try:
+                idx = int(user_input.split(' ', 1)[1].strip())
+                if cache_remove(idx):
+                    print(f"Cache entry {idx} removed.")
+                else:
+                    print(f"Invalid index {idx}. Use .list to see entries.")
+            except (ValueError, IndexError):
+                print("Usage: .remove <idx> (e.g., .remove 1)")
+            continue
+
+        # Treat as domain
+        domain_name = user_input
+        if not domain_name:
+            continue
 
         record_type = "A"
 
@@ -231,6 +261,9 @@ if __name__ == '__main__':
         results = get_dns_record(sock, domain_name, ROOT_SERVER, record_type)
         if results:
             print(f"Resolved {domain_name} {record_type} -> {results}")
+            # Populate cache_id_map for list/remove
+            cache_counter += 1
+            cache_id_map[cache_counter] = (domain_name, record_type)
         else:
             print("Resolution failed.")
 
