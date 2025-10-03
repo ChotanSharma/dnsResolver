@@ -1,6 +1,6 @@
 from dnslib import DNSRecord, DNSHeader, DNSBuffer, DNSQuestion, RR, QTYPE, RCODE
 from socket import socket, SOCK_DGRAM, AF_INET
-
+import time
 """
 There are 13 root servers defined at https://www.iana.org/domains/root/servers
 """
@@ -12,6 +12,78 @@ DNS_PORT = 53
 def normalize_domain(domain: str) -> str:
     return domain.lower().strip('.') + '.'
 
+
+cache = {}  # { domain: { "A": [ {value: ip, expiry: ts}, ... ] } } idea taken from grok AI
+cache_id_map = {}  # {id: (domain, type)}
+
+def update_cache(rr):
+    """
+    Store resource record in cache by type.
+    """
+    name = normalize_domain(str(rr.rname))
+    rtype = QTYPE[rr.rtype]   # e.g. "A", "AAAA", "NS", "CNAME"
+    rdata = str(rr.rdata)
+    ttl = rr.ttl
+
+    expiry = time.time() + ttl   # absolute timestamp when record expires
+
+    # adding new entry to the cache
+    if name not in cache:
+        cache[name] = {}
+    if rtype not in cache[name]:
+        cache[name][rtype] = []
+
+    cache[name][rtype].append({"value": rdata, "expiry": expiry})
+
+def check_cache(domain, rtype="A"):
+    """
+    Check if a domain/rtype is in cache and not expired.
+    Returns a list of valid cached records or None.
+    """
+    domain = normalize_domain(domain)
+    # now compares time with ttl added expiry time
+    now = time.time()
+
+    if domain in cache and rtype in cache[domain]:
+        # storing records of ip in a list
+        records = []
+        for entry in cache[domain][rtype]:
+            if entry["expiry"] > now:
+                records.append(entry["value"])
+            else:
+                print(f"Expired cache entry: {domain} {rtype} {entry['value']}")
+
+        if records:
+            return records
+
+    return None
+
+def cache_list():
+    output = []
+    idx = 1
+    for cache_id, (domain, rtype) in sorted(cache_id_map.items()):
+        values = check_cache(domain, rtype)
+        for value in values:
+            output.append(f"{idx}. {domain} ({rtype}): {value}")
+            idx += 1
+    return output
+
+def cache_clear():
+    global cache, cache_id_map
+    cache = {}
+    cache_id_map = {}
+
+def cache_remove(idx):
+    if idx <= 0 or idx > len(cache_id_map):
+        return False
+    cache_id = sorted(cache_id_map.keys())[idx-1]
+    domain, rtype = cache_id_map[cache_id]
+    del cache_id_map[cache_id]
+    if domain in cache and rtype in cache[domain]:
+        cache[domain][rtype] = []
+        if not cache[domain]:
+            del cache[domain]
+    return True
 
 def get_dns_record(udp_socket, domain:str, parent_server: str, record_type):
   q = DNSRecord.question(domain, qtype = record_type)
