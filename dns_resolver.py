@@ -85,14 +85,9 @@ def cache_remove(idx):
             del cache[domain]
     return True
 
-def get_dns_record(udp_socket, domain:str, parent_server: str, record_type):
-  q = DNSRecord.question(domain, qtype = record_type)
-  q.header.rd = 0   # Recursion Desired?  NO
-  print("DNS query", repr(q))
-  udp_socket.sendto(q.pack(), (parent_server, DNS_PORT))
-  pkt, _ = udp_socket.recvfrom(8192)
-  buff = DNSBuffer(pkt)
-  
+
+def resolve_domain(udp_socket, domain: str, parent_server: str, record_type: str) -> list:
+    
   """
   RFC1035 Section 4.1 Format
   
@@ -104,49 +99,112 @@ def get_dns_record(udp_socket, domain:str, parent_server: str, record_type):
   5. Additional
   """
 
-  # a variable to store the the ip address
-  ip_addresses = []  
-  name_to_ips = {}  # Dictionary to map names to their IP addresses
-  
-  header = DNSHeader.parse(buff)
-  print("DNS header", repr(header))
-  if q.header.id != header.id:
-    print("Unmatched transaction")
-    return
-  if header.rcode != RCODE.NOERROR:
-    print("Query failed")
-    return
-
-  # Parse the question section #2
-  for k in range(header.q):
-    q = DNSQuestion.parse(buff)
-    print(f"Question-{k} {repr(q)}")
     
-  # Parse the answer section #3
-  for k in range(header.a):
-    a = RR.parse(buff)
-    print(f"Answer-{k} {repr(a)}")
-    if a.rtype == QTYPE.A:
-      print("IP address")
-      ip_addresses.append(str(a.rdata)) 
+    
+    
+  """
+  Iterative DNS resolver: Follow referrals until answer or error.
+  Returns list of values (e.g., IPs) or empty list on failure.
+"""
+  domain = normalize_domain(domain)
+  #dynamically retrieving the attributes
+  record_type_enum = getattr(QTYPE, record_type)
+  current_server = ROOT_SERVER
 
-  # Parse the authority section #4
-  for k in range(header.auth):
-    auth = RR.parse(buff)
-    print(f"Authority-{k} {repr(auth)}")
+  while True:
+        # Check cache first (for the target domain)
+        cached = check_cache(domain, record_type)
+        if cached:
+            print(f"[CACHE HIT] {domain} {record_type} -> {cached}")
+            return cached
+
+        # Build and send query
+        q = DNSRecord.question(domain, qtype = record_type)
+        q.header.rd = 0   # Recursion Desired?  NO
+        print("DNS query", repr(q))
+        udp_socket.sendto(q.pack(), (parent_server, DNS_PORT))
       
-  # Parse the additional section #5
-  for k in range(header.ar):
-    adr = RR.parse(buff)
-    print(f"Additional-{k} {repr(adr)} Name: {adr.rname}")
-    if adr.rtype == QTYPE.A:  # Only grab IPv4 A records
-            name = str(adr.rname).rstrip('.')  # Clean name, e.g., 'a.edu-servers.net'
-            if name not in name_to_ips:
-                name_to_ips[name] = []
-            name_to_ips[name].append(str(adr.rdata))  # Add IP to list for that name
-            print(f"Grabbed IP '{adr.rdata}' for '{name}'")
-    # Return the IP address from the answer section
-  return ip_addresses, name_to_ips
+        try:
+            pkt, _ = udp_socket.recvfrom(8192)
+        except socket.timeout:
+            print("Query timed out.")
+            return []
+        buff = DNSBuffer(pkt)
+        header = DNSHeader.parse(buff)
+        print("DNS header", repr(header))
+
+        if q.header.id != header.id:
+            print("Unmatched transaction")
+            return []
+
+        if header.rcode != RCODE.NOERROR:
+            if header.rcode == RCODE.NXDOMAIN:
+                print("This domain name does not exist. Please enter a valid domain name.")
+            else:
+                print("Query failed for format error or being refused or for other reasons.")
+            return []
+
+        # Parse the question section #2
+        for k in range(header.q):
+            q = DNSQuestion.parse(buff)
+            print(f"Question-{k} {repr(q)}")
+
+        # Parse the answer section #3
+        answers = []
+        for k in range(header.a):
+            a = RR.parse(buff)
+            print(f"Answer-{k} {repr(a)}")
+            update_cache(a)
+            if a.rtype == record_type_enum:
+                answers.append(str(a.rdata))
+                if record_type == 'A':
+                    print("IP address")
+
+        if answers:
+            return answers
+
+        # Parse the authority section #4 for NS referrals
+        ns_list = []
+        for k in range(header.auth):
+            auth = RR.parse(buff)
+            print(f"Authority-{k} {repr(auth)}")
+            update_cache(auth)
+            if auth.rtype == QTYPE.NS:
+                ns_name = normalize_domain(str(auth.rdata))
+                ns_list.append(ns_name)
+
+        # Parse the additional section for records
+        record_map = {}
+        for k in range(header.ar):
+            adr = RR.parse(buff)
+            print(f"Additional-{k} {repr(adr)}")
+            if adr.rtype == QTYPE.A:
+                g_domain = normalize_domain(str(adr.rname))
+                record_map[g_domain] = str(adr.rdata)
+                update_cache(adr)  # Cache IPs
+
+        # Select next server from first NS with glue or cached IP
+        next_server = None
+        if ns_list:
+            ns_name = ns_list[0]  # Use first NS for simplicity
+            next_server = record_map.get(ns_name)
+            if not next_server:
+                cached_glue = check_cache(ns_name, 'A')
+                if cached_glue:
+                    next_server = cached_glue[0]
+                else:
+                    print(f"Resolving IP for {ns_name}...")
+                    glue_ip = get_dns_record(udp_socket, ns_name, parent_server, 'A')
+                    if glue_ip:
+                        next_server = glue_ip[0]
+
+        if next_server:
+            current_server = next_server
+            print(f"Following referral to {current_server} for {domain}")
+            continue  # Iterate to next level
+        else:
+            print("No suitable name server found in referral.")
+            return []
 
   
 if __name__ == '__main__':
