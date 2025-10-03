@@ -86,7 +86,7 @@ def cache_remove(idx):
     return True
 
 
-def resolve_domain(udp_socket, domain: str, parent_server: str, record_type: str) -> list:
+def get_dns_record(udp_socket, domain: str, parent_server: str, record_type: str) -> list:
     
   """
   RFC1035 Section 4.1 Format
@@ -109,7 +109,7 @@ def resolve_domain(udp_socket, domain: str, parent_server: str, record_type: str
   domain = normalize_domain(domain)
   #dynamically retrieving the attributes
   record_type_enum = getattr(QTYPE, record_type)
-  current_server = ROOT_SERVER
+  current_server = parent_server
 
   while True:
         # Check cache first (for the target domain)
@@ -122,7 +122,7 @@ def resolve_domain(udp_socket, domain: str, parent_server: str, record_type: str
         q = DNSRecord.question(domain, qtype = record_type)
         q.header.rd = 0   # Recursion Desired?  NO
         print("DNS query", repr(q))
-        udp_socket.sendto(q.pack(), (parent_server, DNS_PORT))
+        udp_socket.sendto(q.pack(), (current_server, DNS_PORT))
       
         try:
             pkt, _ = udp_socket.recvfrom(8192)
@@ -208,28 +208,30 @@ def resolve_domain(udp_socket, domain: str, parent_server: str, record_type: str
 
   
 if __name__ == '__main__':
-  # Create a UDP socket
-  sock = socket(AF_INET, SOCK_DGRAM)
-  # Get all the .edu name servers from the ROOT SERVER
-  while True:
-    domain_name = input("Enter a domain name or .exit > ").strip()
+     # Create a UDP socket with timeout
+    sock = socket(AF_INET, SOCK_DGRAM)
+    sock.settimeout(5)  # 5 second timeout
 
-    if domain_name == '.exit':
+    # Get all the .edu name servers from the ROOT SERVER
+    while True:
+        domain_name = input("Enter a domain name or .exit > ").strip()
+
+        if domain_name == '.exit':
             break
 
-    # First check the cache
-   
-    # Resolve iteratively
-    results, name_to_ips = get_dns_record(sock, domain_name, ROOT_SERVER, 'A')# hard coding the record type to 
-    if results:
-        print(f"Resolved {domain_name}  -> {results}")
-    else:
-        print("Resolution failed.")
-        if name_to_ips:
-            print(f"Referral name-to-IPs: {name_to_ips}")
-            # Optional: Example usage for next query
-            first_name = next(iter(name_to_ips))
-            first_ip = name_to_ips[first_name][0]
-            print(f"Next server example: {first_name} -> {first_ip}")
+        record_type = "A"
+
+        # First check the cache
+        cached = check_cache(domain_name, record_type)
+        if cached:
+            print(f"[CACHE HIT] {domain_name} {record_type} -> {cached}")
+            continue  # Next query
+
+        # Resolve iteratively
+        results = get_dns_record(sock, domain_name, ROOT_SERVER, record_type)
+        if results:
+            print(f"Resolved {domain_name} {record_type} -> {results}")
         else:
-            print("No referrals found.")
+            print("Resolution failed.")
+
+    sock.close()
